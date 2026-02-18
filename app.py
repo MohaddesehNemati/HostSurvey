@@ -8,7 +8,7 @@ import re
 
 st.set_page_config(page_title="Dashboard | بستن تقویم", layout="wide")
 
-# --- Persian font (works well on Streamlit Cloud) ---
+# --- Persian font ---
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;600;700&display=swap');
@@ -17,6 +17,7 @@ html, body, [class*="css"], .stApp { font-family: 'Vazirmatn', sans-serif !impor
 """, unsafe_allow_html=True)
 
 PERSIAN_FONT = "Vazirmatn"
+APP_VERSION = "v6"  # cache-busting key
 
 _candidates = sorted(glob.glob("data/*.xlsx"))
 DEFAULT_XLSX_PATH = _candidates[0] if _candidates else "data/analysis.xlsx"
@@ -33,29 +34,23 @@ def _apply_plotly_font(fig):
     return fig
 
 def pie_chart(df: pd.DataFrame, names_col: str, values_col: str, title: str):
+    if df.empty:
+        st.info("داده‌ای برای نمایش وجود ندارد.")
+        return
     fig = px.pie(df, names=names_col, values=values_col, title=title, hole=0.35)
     fig.update_traces(textposition="inside", textinfo="percent+label")
     st.plotly_chart(_apply_plotly_font(fig), use_container_width=True)
 
 def bar_chart(df: pd.DataFrame, x: str, y: str, title: str):
+    if df.empty:
+        st.info("داده‌ای برای نمایش وجود ندارد.")
+        return
     fig = px.bar(df, x=x, y=y, title=title)
     st.plotly_chart(_apply_plotly_font(fig), use_container_width=True)
 
-def _top_with_other(value_counts: pd.Series, top_n: int = 10, other_label: str = "سایر"):
-    vc = value_counts.copy()
-    if len(vc) <= top_n:
-        out = vc.reset_index()
-        out.columns = ["name", "count"]
-        return out
-    top = vc.head(top_n)
-    other = vc.iloc[top_n:].sum()
-    out = pd.concat([top, pd.Series({other_label: other})]).reset_index()
-    out.columns = ["name", "count"]
-    return out
-
 # ---------------- "سایر" Tagging rules ----------------
 def tag_other_reason(text: str) -> str:
-    if not text:
+    if text is None:
         return "سایر/نامشخص"
     t = str(text)
 
@@ -78,7 +73,7 @@ def tag_other_reason(text: str) -> str:
     return "سایر/متفرقه"
 
 def tag_other_sellmethod(text: str) -> str:
-    if not text:
+    if text is None:
         return "سایر/نامشخص"
     t = str(text)
 
@@ -88,7 +83,7 @@ def tag_other_sellmethod(text: str) -> str:
         return "شبکه‌های اجتماعی/پیام‌رسان"
     if re.search(r"سایت|وبسایت|وب\s*سایت|رزرو\s*مستقیم|تماس|شماره", t):
         return "مستقیم/وبسایت/تماس"
-    if re.search(r"پلتفرم|سایر\s*پلتفرم|شب|جاجی|هتل|booking|airbnb|اقامت24|جاباما", t, re.IGNORECASE):
+    if re.search(r"پلتفرم|سایر\s*پلتفرم|شب|جاجی|booking|airbnb|اقامت24|هتل", t, re.IGNORECASE):
         return "پلتفرم‌های رزرو آنلاین"
     if re.search(r"آژانس|تور|کارگزار", t):
         return "آژانس/تور"
@@ -96,74 +91,69 @@ def tag_other_sellmethod(text: str) -> str:
         return "سازمانی"
     return "سایر/متفرقه"
 
-@st.cache_data
-def _normalize(df: pd.DataFrame) -> pd.DataFrame:
-    # Columns
-    reason_cols = [c for c in df.columns if "دلیل" in c]
-    if not reason_cols:
-        raise ValueError("ستونِ دلیل در دیتاست پیدا نشد.")
-    reason_col = reason_cols[0]
+def _ensure_other_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
 
-    sell_cols = [c for c in df.columns if "روش فروش" in c]
+    reason_cols = [c for c in out.columns if "دلیل" in c]
+    reason_col = reason_cols[0] if reason_cols else None
+    sell_cols = [c for c in out.columns if "روش فروش" in c]
     sell_col = sell_cols[0] if sell_cols else None
 
-    out = df.copy()
-    out["Reason_raw"] = out[reason_col].astype(str)
+    if "Reason_norm" not in out.columns and reason_col:
+        def normalize_reason(x):
+            if pd.isna(x): return "نامشخص"
+            s = str(x).strip()
+            if s.startswith("سایر"): return "سایر (متن آزاد)"
+            return s
+        out["Reason_norm"] = out[reason_col].apply(normalize_reason)
 
-    def normalize_reason(x):
-        if pd.isna(x):
-            return "نامشخص"
-        s = str(x).strip()
-        if s.startswith("سایر"):
-            return "سایر (متن آزاد)"
-        return s
+    if "Reason_other_text" not in out.columns:
+        out["Reason_other_text"] = ""
+        if reason_col:
+            mask_other = out[reason_col].astype(str).str.startswith("سایر")
+            out.loc[mask_other, "Reason_other_text"] = (
+                out.loc[mask_other, reason_col].astype(str)
+                .str.replace(r"^سایر\s*[-–:]\s*", "", regex=True).str.strip()
+            )
 
-    out["Reason_norm"] = out[reason_col].apply(normalize_reason)
+    if "Reason_other_tag" not in out.columns:
+        out["Reason_other_tag"] = out["Reason_other_text"].apply(tag_other_reason)
 
-    # Extract free text for "سایر - ..."
-    out["Reason_other_text"] = ""
-    mask_other = out[reason_col].astype(str).str.startswith("سایر")
-    out.loc[mask_other, "Reason_other_text"] = (
-        out.loc[mask_other, reason_col]
-        .astype(str)
-        .str.replace(r"^سایر\s*[-–:]\s*", "", regex=True)
-        .str.strip()
-    )
-    out["Reason_other_tag"] = out["Reason_other_text"].apply(tag_other_reason)
+    if "Sell_raw" not in out.columns:
+        if sell_col:
+            out["Sell_raw"] = out[sell_col].fillna("نامشخص").astype(str).str.strip()
+        else:
+            out["Sell_raw"] = "نامشخص"
 
-    # Selling methods
-    if sell_col:
-        out["Sell_raw"] = out[sell_col].fillna("نامشخص").astype(str).str.strip()
-    else:
-        out["Sell_raw"] = "نامشخص"
+    if "SellMethod" not in out.columns:
+        out["SellMethod"] = out["Sell_raw"].replace({"nan":"نامشخص"})
 
-    out["SellMethod"] = out["Sell_raw"].replace({"nan":"نامشخص"})
-    out["Sell_other_text"] = ""
-    mask_sell_other = out["Sell_raw"].astype(str).str.startswith("سایر")
-    out.loc[mask_sell_other, "Sell_other_text"] = (
-        out.loc[mask_sell_other, "Sell_raw"]
-        .astype(str)
-        .str.replace(r"^سایر\s*[-–:]\s*", "", regex=True)
-        .str.strip()
-    )
-    out["Sell_other_tag"] = out["Sell_raw"].apply(tag_other_sellmethod)
+    if "Sell_other_text" not in out.columns:
+        out["Sell_other_text"] = ""
+        mask_sell_other = out["Sell_raw"].astype(str).str.startswith("سایر")
+        out.loc[mask_sell_other, "Sell_other_text"] = (
+            out.loc[mask_sell_other, "Sell_raw"].astype(str)
+            .str.replace(r"^سایر\s*[-–:]\s*", "", regex=True).str.strip()
+        )
 
-    # Numeric columns
-    for col in ["Orate", "TO", "TFO", "RateScore", "RateCount", "Capacity", "AIV", "NMV"]:
+    if "Sell_other_tag" not in out.columns:
+        out["Sell_other_tag"] = out["Sell_raw"].apply(tag_other_sellmethod)
+
+    for col in ["Orate", "TO", "TFO", "RateScore", "RateCount", "Capacity", "AIV", "NMV", "AccommodationCountPerHost"]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
 
     return out
 
 @st.cache_data
-def load_data_from_path(path: str) -> pd.DataFrame:
+def load_data_from_path(path: str, _version: str) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name="Merged_data")
-    return _normalize(df)
+    return _ensure_other_columns(df)
 
 @st.cache_data
-def load_data_from_upload(uploaded_file) -> pd.DataFrame:
+def load_data_from_upload(uploaded_file, _version: str) -> pd.DataFrame:
     df = pd.read_excel(uploaded_file, sheet_name="Merged_data")
-    return _normalize(df)
+    return _ensure_other_columns(df)
 
 st.title("داشبورد تحلیل بستن تقویم (تعطیلات ۲۱ تا ۲۴ بهمن)")
 
@@ -171,6 +161,10 @@ with st.sidebar:
     st.header("منبع داده")
     st.caption("فایل‌های داخل پوشه data/ که اپ می‌بیند:")
     st.write(sorted(glob.glob("data/*.xlsx")))
+
+    if st.button("پاک‌کردن کش (Fix errors)"):
+        st.cache_data.clear()
+        st.success("کش پاک شد. صفحه را Refresh کن یا دوباره Run کن.")
 
     mode = st.radio(
         "داده‌ها از کجا خوانده شود؟",
@@ -188,19 +182,19 @@ df = None
 if mode == "از فایل داخل ریپو (پیشنهادی)":
     if load_btn:
         try:
-            df = load_data_from_path(xlsx_path)
+            df = load_data_from_path(xlsx_path, APP_VERSION)
         except Exception as e:
             st.error(f"خطا در خواندن فایل: {e}")
     else:
         try:
             if pathlib.Path(xlsx_path).exists():
-                df = load_data_from_path(xlsx_path)
+                df = load_data_from_path(xlsx_path, APP_VERSION)
         except Exception:
             pass
 else:
     if uploaded is not None:
         try:
-            df = load_data_from_upload(uploaded)
+            df = load_data_from_upload(uploaded, APP_VERSION)
         except Exception as e:
             st.error(f"خطا در خواندن فایل: {e}")
 
@@ -232,24 +226,51 @@ if type_sel and "TypeMPO" in f.columns:
 if reason_sel:
     f = f[f["Reason_norm"].isin(reason_sel)]
 
-# ---------------- KPI ----------------
-k1, k2, k3, k4, k5 = st.columns(5)
-total = len(f)
-hosts = f["Host"].nunique() if "Host" in f.columns else 0
-share_outside = (f["Reason_norm"].eq(OUTSIDE_REASON).mean() * 100) if total else 0
-median_orate = float(np.nanmedian(f["Orate"])) if ("Orate" in f.columns and total) else np.nan
-avg_to = float(np.nanmean(f["TO"])) if ("TO" in f.columns and total) else np.nan
+# Safety: ensure derived columns exist even after filtering
+f = _ensure_other_columns(f)
 
-k1.metric("تعداد پاسخ", f"{total:,}")
-k2.metric("تعداد Host یکتا", f"{hosts:,}")
-k3.metric("سهم رزرو خارج از جاباما", f"{share_outside:.1f}%")
-k4.metric("میانه Orate", f"{median_orate:.3f}" if not np.isnan(median_orate) else "-")
-k5.metric("میانگین TO (Orders)", f"{avg_to:.2f}" if not np.isnan(avg_to) else "-")
+# ---------------- Top Summary (requested) ----------------
+# 1) number of responses
+total = len(f)
+
+# 2) number of hosts
+hosts = f["Host"].nunique() if "Host" in f.columns else 0
+
+# 3) accommodations per host (use provided column if exists, else compute as unique AccommodationCountPerHost mean, else fallback)
+acc_per_host = np.nan
+if "AccommodationCountPerHost" in f.columns and f["AccommodationCountPerHost"].notna().any():
+    # avoid over-weighting hosts with multiple responses
+    tmp = f.dropna(subset=["Host"]).drop_duplicates(subset=["Host"])
+    acc_per_host = float(np.nanmean(tmp["AccommodationCountPerHost"]))
+else:
+    # fallback: if accommodation_id exists
+    acc_id_cols = [c for c in f.columns if "Accommodation" in c and "Count" not in c]
+    # can't reliably infer; keep nan
+    acc_per_host = np.nan
+
+# 4) top reason among reasons
+top_reason = "-"
+if "Reason_norm" in f.columns and total:
+    top_reason = f["Reason_norm"].value_counts().idxmax()
+
+# 5) top sell method within outside reason
+top_outside_sell = "-"
+fo = f[f["Reason_norm"].eq(OUTSIDE_REASON)].copy()
+if len(fo) > 0:
+    top_outside_sell = fo["SellMethod"].value_counts().idxmax()
+
+st.subheader("خلاصه کلی (براساس فیلترهای بالا)")
+s1, s2, s3, s4, s5 = st.columns(5)
+s1.metric("تعداد پاسخ‌ها", f"{total:,}")
+s2.metric("تعداد هاست‌ها", f"{hosts:,}")
+s3.metric("تعداد اقامتگاه به ازای هر هاست", f"{acc_per_host:.2f}" if not np.isnan(acc_per_host) else "-")
+s4.metric("بیشترین ریزن در دلایل", top_reason)
+s5.metric("بیشترین ریزن در فروش خارج از جاباما", top_outside_sell)
 
 st.divider()
 
 # ============================================================
-# 1) سهم ریزن ها + دسته‌بندی "سایر"
+# ۱) سهم ریزن‌ها + دسته‌بندی "سایر"
 # ============================================================
 st.header("۱) سهم ریزن‌ها")
 rc = f["Reason_norm"].value_counts().reset_index()
@@ -282,23 +303,12 @@ else:
             pie_tag = pd.concat([pie_tag, pd.DataFrame([{"تگ":"سایر", "تعداد": tag_counts.iloc[10:]["تعداد"].sum()}])], ignore_index=True)
         pie_chart(pie_tag, names_col="تگ", values_col="تعداد", title="پای‌چارت تگ‌های «سایر» (ریزن اصلی)")
 
-    st.caption("نمونه متن‌های «سایر» به تفکیک تگ (تا 5 نمونه برای هر تگ):")
-    samples = (
-        other_rows.loc[other_rows["Reason_other_text"].astype(str).str.len() > 0, ["Reason_other_tag", "Reason_other_text"]]
-        .drop_duplicates()
-        .groupby("Reason_other_tag")
-        .head(5)
-        .rename(columns={"Reason_other_tag":"تگ", "Reason_other_text":"متن"})
-    )
-    st.dataframe(samples, use_container_width=True)
-
 st.divider()
 
 # ============================================================
-# 2) سهم روش‌های فروش خارج از جاباما + دسته‌بندی "سایر"
+# ۲) سهم روش‌های فروش خارج از جاباما + دسته‌بندی "سایر"
 # ============================================================
 st.header("۲) سهم روش‌های فروش خارج از جاباما (برای ریزن «رزرو خارج از جاباما»)")
-fo = f[f["Reason_norm"].eq(OUTSIDE_REASON)].copy()
 if len(fo) == 0:
     st.info("با فیلترهای فعلی، ریزن «رزرو خارج از جاباما» وجود ندارد.")
 else:
@@ -320,37 +330,17 @@ else:
     if len(sell_other) == 0:
         st.info("در روش فروشِ خارج از جاباما، موردی با شروع «سایر ...» وجود ندارد (یا بعد از فیلتر حذف شده).")
     else:
-        st.caption("تگ‌ها بر اساس کلمات کلیدی (دیوار/شبکه اجتماعی/پلتفرم رزرو/...) ساخته شده‌اند.")
         sell_tag_counts = sell_other["Sell_other_tag"].value_counts().reset_index()
         sell_tag_counts.columns = ["تگ", "تعداد"]
         sell_tag_counts = sell_tag_counts.sort_values("تعداد", ascending=False)
-
-        c2a, c2b = st.columns([1,1])
-        with c2a:
-            bar_chart(sell_tag_counts, x="تگ", y="تعداد", title="تعداد تگ‌ها در «سایر» (روش فروش)")
-        with c2b:
-            pie_sell_tag = sell_tag_counts.head(10).copy()
-            if len(sell_tag_counts) > 10:
-                pie_sell_tag = pd.concat([pie_sell_tag, pd.DataFrame([{"تگ":"سایر", "تعداد": sell_tag_counts.iloc[10:]["تعداد"].sum()}])], ignore_index=True)
-            pie_chart(pie_sell_tag, names_col="تگ", values_col="تعداد", title="پای‌چارت تگ‌های «سایر» (روش فروش)")
-
-        samples2 = (
-            sell_other.loc[sell_other["Sell_other_text"].astype(str).str.len() > 0, ["Sell_other_tag", "Sell_other_text"]]
-            .drop_duplicates()
-            .groupby("Sell_other_tag")
-            .head(5)
-            .rename(columns={"Sell_other_tag":"تگ", "Sell_other_text":"متن"})
-        )
-        st.caption("نمونه متن‌های «سایر» در روش فروش (تا 5 نمونه برای هر تگ):")
-        st.dataframe(samples2, use_container_width=True)
+        bar_chart(sell_tag_counts, x="تگ", y="تعداد", title="تعداد تگ‌ها در «سایر» (روش فروش)")
 
 st.divider()
 
 # ============================================================
-# 3) سهم‌ها به تفکیک زون
+# ۳) سهم‌ها به تفکیک زون
 # ============================================================
 st.header("۳) سهم‌ها به تفکیک زون")
-
 if "Zone" not in f.columns or f["Zone"].dropna().empty:
     st.info("ستون Zone موجود نیست یا بعد از فیلتر خالی است.")
 else:
@@ -372,19 +362,16 @@ else:
 st.divider()
 
 # ============================================================
-# 4) Average TO per Reason per Zone
+# ۴) میانگین TO در هر ریزن به تفکیک زون
 # ============================================================
 st.header("۴) میانگین تعداد سفارش (TO) در هر ریزن به تفکیک زون")
-
 if "TO" not in f.columns or f["TO"].dropna().empty:
     st.info("ستون TO موجود نیست یا داده‌ای ندارد.")
 elif "Zone" not in f.columns or f["Zone"].dropna().empty:
     st.info("ستون Zone موجود نیست یا بعد از فیلتر خالی است.")
 else:
     to_table = (
-        f.groupby(["Zone", "Reason_norm"])["TO"]
-        .mean()
-        .reset_index()
+        f.groupby(["Zone", "Reason_norm"])["TO"].mean().reset_index()
         .rename(columns={"Reason_norm":"ریزن", "TO":"میانگین TO"})
     )
     top_zones = f["Zone"].value_counts().head(12).index.tolist()
@@ -397,7 +384,7 @@ else:
 st.divider()
 
 # ============================================================
-# 5) Top 3 cities per reason
+# ۵) در هر ریزن: ۳ شهر با بیشترین انتخاب
 # ============================================================
 st.header("۵) در هر ریزن: ۳ شهر با بیشترین انتخاب")
 if "City" not in f.columns or f["City"].dropna().empty:
@@ -410,23 +397,18 @@ else:
         for city, cnt in top3.items():
             rows.append({"ریزن": r, "شهر": city, "تعداد": int(cnt)})
     top_city_df = pd.DataFrame(rows)
-    if top_city_df.empty:
-        st.info("داده‌ای برای نمایش وجود ندارد.")
-    else:
-        st.dataframe(top_city_df.sort_values(["ریزن","تعداد"], ascending=[True, False]), use_container_width=True)
+    st.dataframe(top_city_df.sort_values(["ریزن","تعداد"], ascending=[True, False]), use_container_width=True)
 
 st.divider()
 
 # ============================================================
-# 6) Orate analysis title fixed
+# ۶) ارتباط Orate با دلایل بستن تقویم (نتیجه سروِی)
 # ============================================================
 st.header("۶) ارتباط Orate با دلایل بستن تقویم (نتیجه سروِی)")
-
 if "Orate" not in f.columns or f["Orate"].dropna().empty:
     st.info("ستون Orate موجود نیست یا داده‌ای ندارد.")
 else:
     c5, c6 = st.columns(2)
-
     with c5:
         med = f.groupby("Reason_norm")["Orate"].median().sort_values(ascending=False).reset_index()
         med.columns = ["ریزن", "میانه Orate"]
