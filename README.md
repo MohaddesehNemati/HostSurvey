@@ -1,4 +1,4 @@
-# Streamlit Dashboard | Calendar Closure
+# Streamlit Dashboard | Host Survey (Calendar Closure)
 
 ## Run locally
 ```bash
