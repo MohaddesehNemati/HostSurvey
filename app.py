@@ -17,7 +17,7 @@ html, body, [class*="css"], .stApp { font-family: 'Vazirmatn', sans-serif !impor
 """, unsafe_allow_html=True)
 
 PERSIAN_FONT = "Vazirmatn"
-APP_VERSION = "v6"  # cache-busting key
+APP_VERSION = "v7"  # cache-busting key
 
 _candidates = sorted(glob.glob("data/*.xlsx"))
 DEFAULT_XLSX_PATH = _candidates[0] if _candidates else "data/analysis.xlsx"
@@ -93,7 +93,6 @@ def tag_other_sellmethod(text: str) -> str:
 
 def _ensure_other_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-
     reason_cols = [c for c in out.columns if "دلیل" in c]
     reason_col = reason_cols[0] if reason_cols else None
     sell_cols = [c for c in out.columns if "روش فروش" in c]
@@ -226,38 +225,20 @@ if type_sel and "TypeMPO" in f.columns:
 if reason_sel:
     f = f[f["Reason_norm"].isin(reason_sel)]
 
-# Safety: ensure derived columns exist even after filtering
 f = _ensure_other_columns(f)
 
-# ---------------- Top Summary (requested) ----------------
-# 1) number of responses
+# ---------------- Top Summary ----------------
 total = len(f)
-
-# 2) number of hosts
 hosts = f["Host"].nunique() if "Host" in f.columns else 0
 
-# 3) accommodations per host (use provided column if exists, else compute as unique AccommodationCountPerHost mean, else fallback)
 acc_per_host = np.nan
 if "AccommodationCountPerHost" in f.columns and f["AccommodationCountPerHost"].notna().any():
-    # avoid over-weighting hosts with multiple responses
     tmp = f.dropna(subset=["Host"]).drop_duplicates(subset=["Host"])
     acc_per_host = float(np.nanmean(tmp["AccommodationCountPerHost"]))
-else:
-    # fallback: if accommodation_id exists
-    acc_id_cols = [c for c in f.columns if "Accommodation" in c and "Count" not in c]
-    # can't reliably infer; keep nan
-    acc_per_host = np.nan
 
-# 4) top reason among reasons
-top_reason = "-"
-if "Reason_norm" in f.columns and total:
-    top_reason = f["Reason_norm"].value_counts().idxmax()
-
-# 5) top sell method within outside reason
-top_outside_sell = "-"
+top_reason = f["Reason_norm"].value_counts().idxmax() if total else "-"
 fo = f[f["Reason_norm"].eq(OUTSIDE_REASON)].copy()
-if len(fo) > 0:
-    top_outside_sell = fo["SellMethod"].value_counts().idxmax()
+top_outside_sell = fo["SellMethod"].value_counts().idxmax() if len(fo) else "-"
 
 st.subheader("خلاصه کلی (براساس فیلترهای بالا)")
 s1, s2, s3, s4, s5 = st.columns(5)
@@ -270,7 +251,7 @@ s5.metric("بیشترین ریزن در فروش خارج از جاباما", to
 st.divider()
 
 # ============================================================
-# ۱) سهم ریزن‌ها + دسته‌بندی "سایر"
+# ۱) سهم ریزن‌ها (همان بار/پای قبلی)
 # ============================================================
 st.header("۱) سهم ریزن‌ها")
 rc = f["Reason_norm"].value_counts().reset_index()
@@ -286,6 +267,7 @@ with c2:
         pie_df = pd.concat([pie_df, pd.DataFrame([{"ریزن":"سایر", "تعداد": rc.iloc[10:]["تعداد"].sum()}])], ignore_index=True)
     pie_chart(pie_df, names_col="ریزن", values_col="تعداد", title="پای‌چارت سهم ریزن‌ها")
 
+# ۱-الف) دسته‌بندی سایر (بدون بارچارت)
 st.subheader("۱-الف) دسته‌بندی ریزن «سایر (متن آزاد)»")
 other_rows = f[f["Reason_norm"].eq("سایر (متن آزاد)")].copy()
 if len(other_rows) == 0:
@@ -294,21 +276,21 @@ else:
     tag_counts = other_rows["Reason_other_tag"].value_counts().reset_index()
     tag_counts.columns = ["تگ", "تعداد"]
     tag_counts = tag_counts.sort_values("تعداد", ascending=False)
-    c1a, c1b = st.columns([1,1])
-    with c1a:
-        bar_chart(tag_counts, x="تگ", y="تعداد", title="تعداد تگ‌ها در «سایر» (ریزن اصلی)")
-    with c1b:
-        pie_tag = tag_counts.head(10).copy()
-        if len(tag_counts) > 10:
-            pie_tag = pd.concat([pie_tag, pd.DataFrame([{"تگ":"سایر", "تعداد": tag_counts.iloc[10:]["تعداد"].sum()}])], ignore_index=True)
-        pie_chart(pie_tag, names_col="تگ", values_col="تعداد", title="پای‌چارت تگ‌های «سایر» (ریزن اصلی)")
+
+    pie_tag = tag_counts.head(10).copy()
+    if len(tag_counts) > 10:
+        pie_tag = pd.concat([pie_tag, pd.DataFrame([{"تگ":"سایر", "تعداد": tag_counts.iloc[10:]["تعداد"].sum()}])], ignore_index=True)
+    pie_chart(pie_tag, names_col="تگ", values_col="تعداد", title="پای‌چارت تگ‌های «سایر» (ریزن)")
+
+    st.dataframe(tag_counts, use_container_width=True)
 
 st.divider()
 
 # ============================================================
-# ۲) سهم روش‌های فروش خارج از جاباما + دسته‌بندی "سایر"
+# ۲) سهم روش‌های فروش خارج از جاباما (pie only + tag other + no bar)
 # ============================================================
-st.header("۲) سهم روش‌های فروش خارج از جاباما (برای ریزن «رزرو خارج از جاباما»)")
+st.header("۲) سهم روش‌های فروش خارج از جاباما")
+
 if len(fo) == 0:
     st.info("با فیلترهای فعلی، ریزن «رزرو خارج از جاباما» وجود ندارد.")
 else:
@@ -316,31 +298,35 @@ else:
     sm.columns = ["روش فروش", "تعداد"]
     sm = sm.sort_values("تعداد", ascending=False)
 
-    c3, c4 = st.columns([1, 1])
-    with c3:
-        bar_chart(sm, x="روش فروش", y="تعداد", title="تعداد روش‌های فروش (نزولی)")
-    with c4:
-        pie_sm = sm.head(10).copy()
-        if len(sm) > 10:
-            pie_sm = pd.concat([pie_sm, pd.DataFrame([{"روش فروش":"سایر", "تعداد": sm.iloc[10:]["تعداد"].sum()}])], ignore_index=True)
-        pie_chart(pie_sm, names_col="روش فروش", values_col="تعداد", title="پای‌چارت روش‌های فروش (فقط خارج از جاباما)")
+    pie_sm = sm.head(10).copy()
+    if len(sm) > 10:
+        pie_sm = pd.concat([pie_sm, pd.DataFrame([{"روش فروش":"سایر", "تعداد": sm.iloc[10:]["تعداد"].sum()}])], ignore_index=True)
+    pie_chart(pie_sm, names_col="روش فروش", values_col="تعداد", title="پای‌چارت سهم روش‌های فروش خارج از جاباما")
 
-    st.subheader("۲-الف) دسته‌بندی «سایر» در روش فروش")
+    # دسته‌بندی سایر در روش فروش (بدون بارچارت)
+    st.subheader("۲-الف) دسته‌بندی «سایر» در روش فروش خارج از جاباما")
     sell_other = fo[fo["Sell_raw"].astype(str).str.startswith("سایر")].copy()
     if len(sell_other) == 0:
-        st.info("در روش فروشِ خارج از جاباما، موردی با شروع «سایر ...» وجود ندارد (یا بعد از فیلتر حذف شده).")
+        st.info("در روش فروش خارج از جاباما، موردی با «سایر ...» وجود ندارد.")
     else:
         sell_tag_counts = sell_other["Sell_other_tag"].value_counts().reset_index()
         sell_tag_counts.columns = ["تگ", "تعداد"]
         sell_tag_counts = sell_tag_counts.sort_values("تعداد", ascending=False)
-        bar_chart(sell_tag_counts, x="تگ", y="تعداد", title="تعداد تگ‌ها در «سایر» (روش فروش)")
+
+        pie_sell_tag = sell_tag_counts.head(10).copy()
+        if len(sell_tag_counts) > 10:
+            pie_sell_tag = pd.concat([pie_sell_tag, pd.DataFrame([{"تگ":"سایر", "تعداد": sell_tag_counts.iloc[10:]["تعداد"].sum()}])], ignore_index=True)
+        pie_chart(pie_sell_tag, names_col="تگ", values_col="تعداد", title="پای‌چارت تگ‌های «سایر» (روش فروش)")
+
+        st.dataframe(sell_tag_counts, use_container_width=True)
 
 st.divider()
 
 # ============================================================
-# ۳) سهم‌ها به تفکیک زون
+# ۳) سهم‌ها به تفکیک زون (Outside sell method with Other-tagged)
 # ============================================================
 st.header("۳) سهم‌ها به تفکیک زون")
+
 if "Zone" not in f.columns or f["Zone"].dropna().empty:
     st.info("ستون Zone موجود نیست یا بعد از فیلتر خالی است.")
 else:
@@ -350,11 +336,18 @@ else:
     zr_share = zr_share.loc[zr_cnt.sum(axis=1).sort_values(ascending=False).index]
     st.dataframe(zr_share, use_container_width=True)
 
-    st.subheader("۳-ب) سهم روش‌های فروش خارج از جاباما در هر زون (درصدی)")
+    st.subheader("۳-ب) سهم روش‌های فروش خارج از جاباما در هر زون (درصدی) - با دسته‌بندی سایر")
     if len(fo) == 0 or "Zone" not in fo.columns or fo["Zone"].dropna().empty:
         st.info("داده‌ای برای خارج از جاباما در این فیلترها وجود ندارد.")
     else:
-        zsm_cnt = pd.crosstab(fo["Zone"], fo["SellMethod"])
+        # Use tagged sell method: if Sell_raw startswith سایر -> use Sell_other_tag else SellMethod
+        fo2 = fo.copy()
+        fo2["SellMethod_tagged"] = np.where(
+            fo2["Sell_raw"].astype(str).str.startswith("سایر"),
+            fo2["Sell_other_tag"],
+            fo2["SellMethod"]
+        )
+        zsm_cnt = pd.crosstab(fo2["Zone"], fo2["SellMethod_tagged"])
         zsm_share = (zsm_cnt.div(zsm_cnt.sum(axis=1), axis=0) * 100).round(1)
         zsm_share = zsm_share.loc[zsm_cnt.sum(axis=1).sort_values(ascending=False).index]
         st.dataframe(zsm_share, use_container_width=True)
@@ -362,31 +355,33 @@ else:
 st.divider()
 
 # ============================================================
-# ۴) میانگین TO در هر ریزن به تفکیک زون
+# ۴) TFO instead of TO, with label "ماه دی"
 # ============================================================
-st.header("۴) میانگین تعداد سفارش (TO) در هر ریزن به تفکیک زون")
-if "TO" not in f.columns or f["TO"].dropna().empty:
-    st.info("ستون TO موجود نیست یا داده‌ای ندارد.")
+st.header("۴) میانگین تعداد TFO در ماه دی در هر ریزن به تفکیک زون")
+
+if "TFO" not in f.columns or f["TFO"].dropna().empty:
+    st.info("ستون TFO موجود نیست یا داده‌ای ندارد.")
 elif "Zone" not in f.columns or f["Zone"].dropna().empty:
     st.info("ستون Zone موجود نیست یا بعد از فیلتر خالی است.")
 else:
-    to_table = (
-        f.groupby(["Zone", "Reason_norm"])["TO"].mean().reset_index()
-        .rename(columns={"Reason_norm":"ریزن", "TO":"میانگین TO"})
+    tfo_table = (
+        f.groupby(["Zone", "Reason_norm"])["TFO"].mean().reset_index()
+        .rename(columns={"Reason_norm":"ریزن", "TFO":"میانگین TFO"})
     )
     top_zones = f["Zone"].value_counts().head(12).index.tolist()
-    to_table = to_table[to_table["Zone"].isin(top_zones)]
-    to_pivot = to_table.pivot_table(index="Zone", columns="ریزن", values="میانگین TO")
-    to_pivot = to_pivot.loc[f["Zone"].value_counts().loc[to_pivot.index].sort_values(ascending=False).index]
+    tfo_table = tfo_table[tfo_table["Zone"].isin(top_zones)]
+    tfo_pivot = tfo_table.pivot_table(index="Zone", columns="ریزن", values="میانگین TFO")
+    tfo_pivot = tfo_pivot.loc[f["Zone"].value_counts().loc[tfo_pivot.index].sort_values(ascending=False).index]
     st.caption("Zoneهای نمایش داده شده = 12 زون برتر از نظر تعداد پاسخ در فیلتر فعلی")
-    st.dataframe(to_pivot.round(2), use_container_width=True)
+    st.dataframe(tfo_pivot.round(2), use_container_width=True)
 
 st.divider()
 
 # ============================================================
-# ۵) در هر ریزن: ۳ شهر با بیشترین انتخاب
+# ۵) ۳ شهر برتر هر ریزن - در یک سطر
 # ============================================================
-st.header("۵) در هر ریزن: ۳ شهر با بیشترین انتخاب")
+st.header("۵) در هر ریزن: ۳ شهر با بیشترین انتخاب (در یک سطر)")
+
 if "City" not in f.columns or f["City"].dropna().empty:
     st.info("ستون City موجود نیست یا بعد از فیلتر خالی است.")
 else:
@@ -394,34 +389,7 @@ else:
     for r in sorted(f["Reason_norm"].dropna().unique()):
         sub = f[f["Reason_norm"] == r]
         top3 = sub["City"].value_counts().head(3)
-        for city, cnt in top3.items():
-            rows.append({"ریزن": r, "شهر": city, "تعداد": int(cnt)})
-    top_city_df = pd.DataFrame(rows)
-    st.dataframe(top_city_df.sort_values(["ریزن","تعداد"], ascending=[True, False]), use_container_width=True)
-
-st.divider()
-
-# ============================================================
-# ۶) ارتباط Orate با دلایل بستن تقویم (نتیجه سروِی)
-# ============================================================
-st.header("۶) ارتباط Orate با دلایل بستن تقویم (نتیجه سروِی)")
-if "Orate" not in f.columns or f["Orate"].dropna().empty:
-    st.info("ستون Orate موجود نیست یا داده‌ای ندارد.")
-else:
-    c5, c6 = st.columns(2)
-    with c5:
-        med = f.groupby("Reason_norm")["Orate"].median().sort_values(ascending=False).reset_index()
-        med.columns = ["ریزن", "میانه Orate"]
-        st.dataframe(med.round(4), use_container_width=True)
-
-    with c6:
-        try:
-            bins = pd.qcut(f["Orate"].fillna(0), q=4, duplicates="drop")
-            labels = [f"Bin {i+1}" for i in range(len(bins.cat.categories))]
-            tmp = f.copy()
-            tmp["Orate_bin"] = pd.qcut(tmp["Orate"].fillna(0), q=4, duplicates="drop", labels=labels)
-            mix = (pd.crosstab(tmp["Orate_bin"], tmp["Reason_norm"], normalize="index") * 100).round(1)
-            st.caption("ترکیب ریزن‌ها داخل هر Bin از Orate (درصدی)")
-            st.dataframe(mix, use_container_width=True)
-        except Exception as e:
-            st.warning(f"باین‌بندی Orate انجام نشد: {e}")
+        cities_str = "، ".join([str(c) for c in top3.index.tolist()]) if len(top3) else "-"
+        rows.append({"ریزن": r, "۳ شهر برتر": cities_str})
+    out_df = pd.DataFrame(rows)
+    st.dataframe(out_df, use_container_width=True)
